@@ -1,0 +1,40 @@
+
+prune_channel:
+    sparsity-train:
+    model     exp    epoch
+    yolov5l   60     300=100+200
+    yolov5s   76     200=100+100
+
+    fine-tune:
+    model    raw_exp exp epoch ratio
+    yolov5l  60      68  100   0.5-0.1
+    yolov5l  60      69  150   0.8-0.1   last_150.pt
+
+    yolov5s  76      78  100   0.5-0.1
+    yolov5s  76      79  100   0.2-0.1
+prune_layer:
+
+    fine-tune:
+    model    raw_exp exp   epoch  overall_layers
+    yolov5l  60            150    6
+    yolov5s  76      84    100    3
+    yolov5s  76      85    100    6
+    yolov5s  76            100    9
+
+新的计划，yolov5s双模态模型稀疏化训练。
+    sparsity-train:
+        model                 exp    epoch
+        yolov5s-visible       87     200=100+100
+        yolov5s-lwir          86     200=100+100
+
+        yolov5l-visible       88     300=100+200
+        yolov5l-lwir          89     300=100+200
+    fine-tune:
+    model             raw_exp      exp     epoch     overall_layers
+    yolov5s-visible   87            91     100       6
+    yolov5s-lwir      86            92     100       6
+
+特征检测尺度平移：
+exp
+96
+
