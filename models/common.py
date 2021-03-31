@@ -72,10 +72,10 @@ class BottleneckCSP(nn.Module):
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), dim=1))))
 
 
-class C3(nn.Module):
+class C3_Res_S(nn.Module):
     # CSP Bottleneck with 3 convolutions
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=[0.5, 0.5], e_in=[1.0]):
-        super(C3, self).__init__()
+        super(C3_Res_S, self).__init__()
         assert len(e) == 2
         c_1 = round(c2 * e[0])
         c_2 = round(c2 * e[1])
@@ -92,7 +92,7 @@ class C3(nn.Module):
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
 
-class C3_OLD(nn.Module):
+class C3(nn.Module):
     # CSP Bottleneck with 3 convolutions
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(C3, self).__init__()
@@ -320,3 +320,95 @@ class Classify(nn.Module):
     def forward(self, x):
         z = torch.cat([self.aap(y) for y in (x if isinstance(x, list) else [x])], 1)  # cat if list
         return self.flat(self.conv(z))  # flatten to x(b,c2)
+
+class TransformerLayer(nn.Module):
+    def __init__(self, c, num_heads):
+        super().__init__()
+
+        self.ln1 = nn.LayerNorm(c)
+        self.q = nn.Linear(c, c, bias=False)
+        self.k = nn.Linear(c, c, bias=False)
+        self.v = nn.Linear(c, c, bias=False)
+        self.ma = nn.MultiheadAttention(embed_dim=c, num_heads=num_heads)
+        self.ln2 = nn.LayerNorm(c)
+        self.fc1 = nn.Linear(c, c, bias=False)
+        self.fc2 = nn.Linear(c, c, bias=False)
+        self.dropout = nn.Dropout(0.1)
+        self.act = nn.ReLU(True)
+
+    def forward(self, x):
+        # x_ = self.ln1(x)
+        # x = self.ma(self.q(x_), self.k(x_), self.v(x_))[0] + x
+        # x = self.ln2(x)
+        # x = self.fc2(self.fc1(x)) + x
+
+        x_ = self.ln1(x)
+        x = self.dropout(self.ma(self.q(x_), self.k(x_), self.v(x_))[0]) + x
+        x_ = self.ln2(x)
+        x_ = self.fc2(self.dropout(self.act(self.fc1(x_))))
+        x = x + self.dropout(x_)
+
+        return x
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self, c1, c2, num_heads, num_layers):
+        super().__init__()
+
+        self.conv = None
+        if c1 != c2:
+            self.conv = Conv(c1, c2)
+        self.linear = nn.Linear(c2, c2)
+        self.tr = nn.Sequential(*[TransformerLayer(c2, num_heads) for _ in range(num_layers)])
+        self.c2 = c2
+
+    def forward(self, x): # input tensor [b,c,w,h]
+        if self.conv is not None:
+            x = self.conv(x)
+        b, _, w, h = x.shape
+        p = x.flatten(2) # squeeze
+        p = p.unsqueeze(0)
+        p = p.transpose(0, 3)
+        p = p.squeeze(3)
+        e = self.linear(p)
+        x = p + e
+
+        x = self.tr(x)
+        x = x.unsqueeze(3)
+        x = x.transpose(0, 3)
+        x = x.reshape(b, self.c2, w, h)
+        return x
+
+
+class C3TR(C3):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)
+        self.m = TransformerBlock(c_, c_, 4, n)
+
+class C3_BL(nn.Module):
+    # CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=[0.5, 0.5], e_in=[1.0]): # ch_in, ch_out, number, shortcut, groups, expansion
+        super(C3_BL, self).__init__()
+        assert len(e) == 2
+        c_1 = round(c2 * e[0])
+        c_2 = round(c2 * e[1])
+        self.cv1 = Conv(c1, c_1, 1, 1)
+        self.cv2 = Conv(c1, c_2, 1, 1)
+        self.bn = nn.BatchNorm2d(c_1+c_2)  # applied to cat(cv2, cv3)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        if shortcut:
+            self.cv3 = Conv(int(c_1 + c_2), c2, 1)
+            self.m = nn.Sequential(*[Bottleneck(c_1, c_1, shortcut, g, e=e_in[n]) for n in range(n)])
+        else:
+            c_1 = round(c2 * e_in[-1])
+            self.cv3 = Conv(int(c_1 + c_2), c2, 1)
+            assert e_in[0] == e[0]
+            self.m = nn.Sequential(*[Bottleneck(round(c2 * e_in[3 * n]), round(c2 * e_in[3 * n + 2]), shortcut, g,
+                                                e=e_in[3 * n + 1] / e_in[3 * n + 2]) for n in range(n)])
+    def forward(self, x):
+        y1 = self.m(self.cv1(x))
+        y2 = self.cv2(x)
+        return self.cv3(self.act(self.bn(torch.cat((y1, y2), dim=1))))
+
+

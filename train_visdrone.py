@@ -22,9 +22,9 @@ from tqdm import tqdm
 
 import test  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
-from models.yolo import Model
+from models.yolo_prune import Model
 from utils.autoanchor import check_anchors
-from datasets.tiny_datasets import create_dataloader
+from datasets.visdrone_datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
@@ -64,8 +64,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         data_dict = yaml.load(f, Loader=yaml.SafeLoader)  # data dict
     with torch_distributed_zero_first(rank):
         check_dataset(data_dict)  # check
-    train_path = data_dict['train']
-    test_path = data_dict['val']
+    train_path = os.path.join(data_dict['train'], opt.modal_name)
+    test_path = os.path.join(data_dict['val'], opt.modal_name)
     nc = 1 if opt.single_cls else int(data_dict['nc'])  # number of classes
     names = ['item'] if opt.single_cls and len(data_dict['names']) != 1 else data_dict['names']  # class names
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
@@ -223,7 +223,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
     scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
+    # scaler = amp.GradScaler(enabled=cuda)
     compute_loss = ComputeLoss(model)  # init loss class
     logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                 f'Using {dataloader.num_workers} dataloader workers\n'
@@ -231,6 +231,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Starting training for {epochs} epochs...')
 
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+        opt_s = opt.s
+        if opt.sr_cos:
+            mask_period = 2
+            # opt_s = opt.s * lf(epoch)
+            opt_s = ((((1 + math.cos(epoch * math.pi / epochs)) / 2) ** 1.0) * 0.8 + 0.2) * opt.s
+            if opt.sr and epoch % mask_period == 0 and epoch > 0:
+                maskBN(model, soft=True)
         model.train()
 
         # Update image weights (optional)
@@ -246,6 +253,10 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 dist.broadcast(indices, 0)
                 if rank != 0:
                     dataset.indices = indices.cpu().numpy()
+
+        # Update mosaic border
+        # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
+        # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
         if rank != -1:
@@ -269,22 +280,43 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     x['lr'] = np.interp(ni, xi, [hyp['warmup_bias_lr'] if j == 2 else 0.0, x['initial_lr'] * lf(epoch)])
                     if 'momentum' in x:
                         x['momentum'] = np.interp(ni, xi, [hyp['warmup_momentum'], hyp['momentum']])
+                if opt.sr_cos:
+                    opt_s = np.interp(ni, xi, [0.0, opt.s * lf(epoch)])
+
+            # Multi-scale
+            if opt.multi_scale:
+                sz = random.randrange(imgsz * 0.5, imgsz * 1.5 + gs) // gs * gs  # size
+                sf = sz / max(imgs.shape[2:])  # scale factor
+                if sf != 1:
+                    ns = [math.ceil(x * sf / gs) * gs for x in imgs.shape[2:]]  # new shape (stretched to gs-multiple)
+                    imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
+
             # Forward
-            with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
-                loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
-                if rank != -1:
-                    loss *= opt.world_size  # gradient averaged between devices in DDP mode
-                if opt.quad:
-                    loss *= 4.
+            # with amp.autocast(enabled=cuda):
+            #     pred = model(imgs)  # forward
+            #     loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+            #     if rank != -1:
+            #         loss *= opt.world_size  # gradient averaged between devices in DDP mode
+            #     if opt.quad:
+            #         loss *= 4.
+            pred = model(imgs)  # forward
+            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+            if rank != -1:
+                loss *= opt.world_size  # gradient averaged between devices in DDP mode
+            if opt.quad:
+                loss *= 4.
 
             # Backward
-            scaler.scale(loss).backward()
-
+            # scaler.scale(loss).backward()
+            loss.backward()
+            if opt.sr and epoch >= opt.base:
+                updateBN(opt_s, model)
             # Optimize
             if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
+                # scaler.step(optimizer)  # optimizer.step
+                # scaler.update()
+                optimizer.step()
+                optimizer.zero_grad()
                 if ema:
                     ema.update(model)
 
@@ -428,12 +460,12 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # /home/shw/code/yolov5-new/yolov5/models/yolov5l.pt
-    parser.add_argument('--weights', type=str, default='/home/shw/code/yolov5-new/yolov5/models/yolov5s.pt',
+    parser.add_argument('--weights', type=str, default='runs/train/exp138/weights/best.pt',
                         help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='./models/yolov5s-tiny.yaml', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='data/tiny_person.yaml', help='data.yaml path')
-    parser.add_argument('--hyp', type=str, default='data/hyp.tiny.person.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--cfg', type=str, default='models/yolov5l_trs.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str, default='data/visdrone10.yaml', help='data.yaml path')
+    parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[672, 672], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
@@ -459,6 +491,11 @@ if __name__ == '__main__':
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
     parser.add_argument('--quad', action='store_true', help='quad dataloader')
     ###
+    parser.add_argument('--sr', action='store_true', default=False, help='Sparsity Training or not')
+    parser.add_argument('--s', type=float, default=0.001, help='scale coefficient in updateBN')
+    parser.add_argument('--sr_cos', action='store_true', default=False, help='Cosine Sparsity rate')
+    parser.add_argument('--modal_name', default='', help='which modal? lwir or visible')
+    parser.add_argument('--base', type=int, default=100, help='base train')
     opt = parser.parse_args()
 
     # Set DDP variables
@@ -506,6 +543,8 @@ if __name__ == '__main__':
         wandb = None
         prefix = colorstr('wandb: ')
         logger.info(f"{prefix}Install Weights & Biases for YOLOv5 logging with 'pip install wandb' (recommended)")
+    if opt.sr:
+        print("***********Sparsity Training***********")
     if not opt.evolve:
         tb_writer = None  # init loggers
         if opt.global_rank in [-1, 0]:

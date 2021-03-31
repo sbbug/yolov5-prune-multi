@@ -274,23 +274,23 @@ def test(data,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights_visible', nargs='+', type=str,
-                        default='runs/train/exp91/weights/best.pt',
+                        default='runs/train/exp87/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--weights_lwir', nargs='+', type=str,
-                        default='runs/train/exp92/weights/best.pt',
+                        default='runs/train/exp86/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=8, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=672, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
-    parser.add_argument('--task', default='val', help="'val', 'test', 'study'")
+    parser.add_argument('--task', default='test', help="'val', 'test', 'study'")
     parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
     parser.add_argument('--save-txt', action='store_true', default=False, help='save results to *.txt')
-    parser.add_argument('--aware', action='store_true', default=False, help='save results to *.txt')
+    parser.add_argument('--aware', action='store_true', default=True, help='save results to *.txt')
     parser.add_argument('--save-hybrid', action='store_true', help='save label+prediction hybrid results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--project', default='runs/test', help='save to project/name')

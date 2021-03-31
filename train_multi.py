@@ -20,16 +20,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import test  # import test.py to get mAP after each epoch
+import test_multi  # import test.py to get mAP after each epoch
 from models.experimental import attempt_load
-from models.yolo_prune import Model
+from models.yolo_prune_multi import Model
 from utils.autoanchor import check_anchors
-from datasets.uav_datasets import create_dataloader
+from datasets.multi_modal_uva_datasets import create_dataloader
 from utils.general import labels_to_class_weights, increment_path, labels_to_image_weights, init_seeds, \
     fitness, strip_optimizer, get_latest_run, check_dataset, check_file, check_git_status, check_img_size, \
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.google_utils import attempt_download
-from utils.loss import ComputeLoss
+from utils.loss_multi import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first
 from functions import gather_bn_weights
@@ -156,7 +156,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 
     # Image sizes
     gs = int(model.stride.max())  # grid size (max stride)
-    nl = model.model[-1].nl  # number of detection layers (used for scaling hyp['obj'])
+    nl = model.model_vs[-1].nl + model.model_lw[-1].nl# number of detection layers (used for scaling hyp['obj'])
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
     # DP mode
@@ -266,9 +266,11 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         if rank in [-1, 0]:
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, lwirs, img_aware, targets, paths,
+                shapes) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+            lwirs = lwirs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
             # Warmup
             if ni <= nw:
@@ -299,8 +301,11 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             #         loss *= opt.world_size  # gradient averaged between devices in DDP mode
             #     if opt.quad:
             #         loss *= 4.
-            pred = model(imgs)  # forward
-            loss, loss_items = compute_loss(pred, targets.to(device))  # loss scaled by batch_size
+            pred_vs, pred_lw = model(imgs, lwirs)  # forward
+            loss_vs, loss_items_vs = compute_loss(pred_vs, targets.to(device))  # loss scaled by batch_size
+            loss_lw, loss_items_lw = compute_loss(pred_lw, targets.to(device))
+            loss = (loss_vs + loss_lw)
+            loss_items = (loss_items_vs + loss_items_lw)
             if rank != -1:
                 loss *= opt.world_size  # gradient averaged between devices in DDP mode
             if opt.quad:
@@ -353,7 +358,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
-                results, maps, times = test.test(opt.data,
+                results, maps, times = test_multi.test(opt.data,
                                                  batch_size=total_batch_size,
                                                  imgsz=imgsz_test,
                                                  model=ema.ema,
@@ -460,9 +465,11 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # /home/shw/code/yolov5-new/yolov5/models/yolov5l.pt
-    parser.add_argument('--weights', type=str, default='/home/shw/code/yolov5-new/yolov5/models/yolov5l.pt',
+    parser.add_argument('--weights', type=str, default='',
                         help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='models/yolov5s-transformer.yaml', help='model.yaml path')
+    parser.add_argument('--cfg', type=str,
+                        default='models/yolov5s.yaml',
+                        help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
     parser.add_argument('--epochs', type=int, default=100)
@@ -477,7 +484,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
@@ -494,7 +501,7 @@ if __name__ == '__main__':
     parser.add_argument('--sr', action='store_true', default=False, help='Sparsity Training or not')
     parser.add_argument('--s', type=float, default=0.001, help='scale coefficient in updateBN')
     parser.add_argument('--sr_cos', action='store_true', default=False, help='Cosine Sparsity rate')
-    parser.add_argument('--modal_name', default='visible', help='which modal? lwir or visible')
+    parser.add_argument('--modal_name', default='', help='which modal? lwir or visible')
     parser.add_argument('--base', type=int, default=100, help='base train')
     opt = parser.parse_args()
 

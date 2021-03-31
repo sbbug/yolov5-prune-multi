@@ -10,7 +10,7 @@ import yaml
 from tqdm import tqdm
 
 from models.experimental import attempt_load
-from datasets.uav_datasets import create_dataloader
+from datasets.multi_modal_uva_datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
 from utils.metrics import ap_per_class, ConfusionMatrix
@@ -94,23 +94,27 @@ def test(data,
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     b_n_s = 0
-    for batch_i, (img, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
+    for batch_i, (imgs, lwirs, img_aware, targets, paths,
+            shapes) in enumerate(tqdm(dataloader, desc=s)):
         b_n_s += 1
-        img = img.to(device, non_blocking=True)
-        img = img.half() if half else img.float()  # uint8 to fp16/32
-        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        imgs = imgs.to(device, non_blocking=True)
+        imgs = imgs.half() if half else imgs.float()  # uint8 to fp16/32
+        lwirs = lwirs.to(device, non_blocking=True)
+        lwirs = lwirs.half() if half else lwirs.float()  # uint8 to fp16/32
+        lwirs /= 255.0  # 0 - 255 to 0.0 - 1.0
         targets = targets.to(device)
-        nb, _, height, width = img.shape  # batch size, channels, height, width
+        nb, _, height, width = imgs.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            out, train_out = model(img, augment=augment)  # inference and training outputs
+            (out_vs, train_out_vs),(out_lw,train_out_lw) = model(imgs,lwirs)  # inference and training outputs
             t0 += time_synchronized() - t
-
+            out = torch.cat((out_vs, out_lw), 1)
             # Compute loss
             if compute_loss:
-                loss += compute_loss([x.float() for x in train_out], targets)[1][:3]  # box, obj, cls
+                loss += compute_loss([x.float() for x in train_out_vs], targets)[1][:3]  # box, obj, cls
+                loss += compute_loss([x.float() for x in train_out_lw], targets)[1][:3]  # box, obj, cls
 
             # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
@@ -134,7 +138,7 @@ def test(data,
 
             # Predictions
             predn = pred.clone()
-            scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
+            scale_coords(imgs[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
 
             # Append to text file
             if save_txt:
@@ -153,7 +157,7 @@ def test(data,
                              "scores": {"class_score": conf},
                              "domain": "pixel"} for *xyxy, conf, cls in pred.tolist()]
                 boxes = {"predictions": {"box_data": box_data, "class_labels": names}}  # inference-space
-                wandb_images.append(wandb.Image(img[si], boxes=boxes, caption=path.name))
+                wandb_images.append(wandb.Image(imgs[si], boxes=boxes, caption=path.name))
 
             # Append to pycocotools JSON dictionary
             if save_json:
@@ -175,7 +179,7 @@ def test(data,
 
                 # target boxes
                 tbox = xywh2xyxy(labels[:, 1:5])
-                scale_coords(img[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
+                scale_coords(imgs[si].shape[1:], tbox, shapes[si][0], shapes[si][1])  # native-space labels
                 if plots:
                     confusion_matrix.process_batch(predn, torch.cat((labels[:, 0:1], tbox), 1))
 
@@ -206,9 +210,9 @@ def test(data,
         # Plot images
         if plots and batch_i < 3:
             f = save_dir / f'test_batch{batch_i}_labels.jpg'  # labels
-            Thread(target=plot_images, args=(img, targets, paths, f, names), daemon=True).start()
+            Thread(target=plot_images, args=(imgs, targets, paths, f, names), daemon=True).start()
             f = save_dir / f'test_batch{batch_i}_pred.jpg'  # predictions
-            Thread(target=plot_images, args=(img, output_to_target(out), paths, f, names), daemon=True).start()
+            Thread(target=plot_images, args=(imgs, output_to_target(out), paths, f, names), daemon=True).start()
 
     # Compute statistics
     stats = [np.concatenate(x, 0) for x in zip(*stats)]  # to numpy
@@ -280,15 +284,15 @@ def test(data,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
-    parser.add_argument('--weights', nargs='+', type=str, default='runs/train/exp88/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/shw/code/yolov5-new/yolov5/runs/train/exp119/weights/best.pt', help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
-    parser.add_argument('--batch-size', type=int, default=8, help='size of each image batch')
+    parser.add_argument('--batch-size', type=int, default=1, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=672, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
-    parser.add_argument('--task', default='test', help='train, val, test, speed or study')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--task', default='val', help='train, val, test, speed or study')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
@@ -299,7 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/test', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--modal_name', default='visible', help='which modal? lwir or visible')
+    parser.add_argument('--modal_name', default='lwir', help='which modal? lwir or visible')
     opt = parser.parse_args()
     opt.save_json |= opt.data.endswith('coco.yaml')
     opt.data = check_file(opt.data)  # check file

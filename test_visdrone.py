@@ -10,7 +10,7 @@ import yaml
 from tqdm import tqdm
 
 from models.experimental import attempt_load
-from datasets.uav_datasets import create_dataloader
+from datasets.visdrone_datasets import create_dataloader
 from utils.general import coco80_to_coco91_class, check_dataset, check_file, check_img_size, check_requirements, \
     box_iou, non_max_suppression, scale_coords, xyxy2xywh, xywh2xyxy, set_logging, increment_path, colorstr
 from utils.metrics import ap_per_class, ConfusionMatrix
@@ -280,8 +280,8 @@ def test(data,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
-    parser.add_argument('--weights', nargs='+', type=str, default='runs/train/exp96/weights/best.pt', help='model.pt path(s)')
-    parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
+    parser.add_argument('--weights', nargs='+', type=str, default='runs/train/exp138/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--data', type=str, default='data/visdrone10.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
     parser.add_argument('--batch-size', type=int, default=8, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=672, help='inference size (pixels)')
@@ -299,7 +299,7 @@ if __name__ == '__main__':
     parser.add_argument('--project', default='runs/test', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
-    parser.add_argument('--modal_name', default='lwir', help='which modal? lwir or visible')
+    parser.add_argument('--modal_name', default='', help='which modal? lwir or visible')
     opt = parser.parse_args()
     opt.save_json |= opt.data.endswith('coco.yaml')
     opt.data = check_file(opt.data)  # check file

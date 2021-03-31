@@ -17,7 +17,7 @@ import yaml
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
 
-from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS, autoShape,C3_Res_S,C3_BL,C3TR
+from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS, autoShape, C3
 from models.experimental import MixConv2d, CrossConv
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging
@@ -100,18 +100,28 @@ class Model(nn.Module):
         if anchors:
             logger.info(f'Overriding model.yaml anchors with anchors={anchors}')
             self.yaml['anchors'] = round(anchors)  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        self.model_vs, self.save_vs = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
+        self.model_lw, self.save_lw = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
         # Build strides, anchors
-        m = self.model[-1]  # Detect()
-        if isinstance(m, Detect):
+        detect_vs = self.model_vs[-1]  # Detect()
+        detect_lw = self.model_lw[-1]
+        if isinstance(detect_vs, Detect) and isinstance(detect_lw, Detect):
+            # visible modal
             s = 256  # 2x min stride
-            m.stride = torch.tensor([s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s))])  # forward
-            m.anchors /= m.stride.view(-1, 1, 1)
-            check_anchor_order(m)
-            self.stride = m.stride
+            detect_vs.stride = torch.tensor(
+                [s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s),torch.zeros(1, ch, s, s))[0]])  # forward
+            detect_vs.anchors /= detect_vs.stride.view(-1, 1, 1)
+            check_anchor_order(detect_vs)
+            self.stride = detect_vs.stride
+            # lwir modal
+            detect_lw.stride = torch.tensor(
+                [s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s),torch.zeros(1, ch, s, s))[0]])  # forward
+            detect_lw.anchors /= detect_lw.stride.view(-1, 1, 1)
+            check_anchor_order(detect_lw)
+            self.stride = detect_lw.stride
             self._initialize_biases()  # only run once
             # print('Strides: %s' % m.stride.tolist())
 
@@ -120,51 +130,43 @@ class Model(nn.Module):
         self.info()
         logger.info('')
 
-    def forward(self, x, augment=False, profile=False):
-        if augment:
-            img_size = x.shape[-2:]  # height, width
-            s = [1, 0.83, 0.67]  # scales
-            f = [None, 3, None]  # flips (2-ud, 3-lr)
-            y = []  # outputs
-            for si, fi in zip(s, f):
-                xi = scale_img(x.flip(fi) if fi else x, si, gs=int(self.stride.max()))
-                yi = self.forward_once(xi)[0]  # forward
-                # cv2.imwrite(f'img_{si}.jpg', 255 * xi[0].cpu().numpy().transpose((1, 2, 0))[:, :, ::-1])  # save
-                yi[..., :4] /= si  # de-scale
-                if fi == 2:
-                    yi[..., 1] = img_size[0] - yi[..., 1]  # de-flip ud
-                elif fi == 3:
-                    yi[..., 0] = img_size[1] - yi[..., 0]  # de-flip lr
-                y.append(yi)
-            return torch.cat(y, 1), None  # augmented inference, train
-        else:
-            return self.forward_once(x, profile)  # single-scale inference, train
+    def forward(self, v_x, l_x):
 
-    def forward_once(self, x, profile=False):
-        y, dt = [], []  # outputs
-        for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+        return self.forward_once(v_x, l_x)  # single-scale inference, train
 
-            if profile:
-                o = thop.profile(m, inputs=(x,), verbose=False)[0] / 1E9 * 2 if thop else 0  # FLOPS
-                t = time_synchronized()
-                for _ in range(10):
-                    _ = m(x)
-                dt.append((time_synchronized() - t) * 100)
-                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
+    def forward_once(self, v_x, l_x):
+        y_vs, dt_vs = [], []  # outputs
+        y_lw, dt_lw = [], []
+        for m_vs, m_lw in zip(self.model_vs, self.model_lw):
 
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
+            # for visible modal
+            if m_vs.f != -1:  # if not from previous layer
+                v_x = y_vs[m_vs.f] if isinstance(m_vs.f, int) else [v_x if j == -1 else y_vs[j] for j in
+                                                                    m_vs.f]  # from earlier layers
 
-        if profile:
-            print('%.1fms total' % sum(dt))
-        return x
+            v_x = m_vs(v_x)  # run
+            y_vs.append(v_x if m_vs.i in self.save_vs else None)  # save output
+
+            # for lwir modal
+            if m_lw.f != -1:  # if not from previous layer
+                l_x = y_lw[m_lw.f] if isinstance(m_lw.f, int) else [l_x if j == -1 else y_lw[j] for j in
+                                                                    m_lw.f]  # from earlier layers
+
+            l_x = m_lw(l_x)  # run
+            y_lw.append(l_x if m_lw.i in self.save_lw else None)  # save output
+
+        return v_x, l_x
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
-        m = self.model[-1]  # Detect() module
+        m = self.model_vs[-1]  # Detect() module
+        for mi, s in zip(m.m, m.stride):  # from
+            b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
+            b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
+            b.data[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
+            mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
+        m = self.model_lw[-1]  # Detect() module
         for mi, s in zip(m.m, m.stride):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
@@ -233,13 +235,13 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, Bottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
-                 C3_Res_S,C3_BL,C3TR]:
+                 C3]:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in [BottleneckCSP, C3_Res_S,C3_BL,C3TR]:
+            if m in [BottleneckCSP, C3]:
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is nn.BatchNorm2d:

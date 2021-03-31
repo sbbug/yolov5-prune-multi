@@ -29,12 +29,36 @@ prune_layer:
 
         yolov5l-visible       88     300=100+200
         yolov5l-lwir          89     300=100+200
+
     fine-tune:
     model             raw_exp      exp     epoch     overall_layers
     yolov5s-visible   87            91     100       6
     yolov5s-lwir      86            92     100       6
 
-特征检测尺度平移：
-exp
-96
+    yolov5l-visible   88            117    100       32
+    yolov5l-visible   88            118    100       36
 
+    yolov5l-lwir      89            120    100       32
+    yolov5l-lwir      89            119    100       36
+
+C3-Res-S新模块引入：
+exp   modal              datasets
+142   visible  包含CB结构  mm-uva
+
+Neck层尺度平移实验：
+exp   modal     datasets
+138   visible   visdrone   平移前
+143   visible   visdrone   平移后
+
+
+transformer实验
+exp   modal    datasets    引入transformer
+87    visible  mm-uva      引入前
+146   visible  mm-uva      引入后
+
+
+特征检测尺度平移：
+exp    dataset
+96     uva         使用exp=86
+XX     tiny-person 失败
+113    visdrone   平移前

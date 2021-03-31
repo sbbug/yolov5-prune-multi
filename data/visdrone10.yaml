@@ -1,0 +1,20 @@
+# train and val data as 1) directory: path/images/, 2) file: path/images.txt, or 3) list: [path1/images/, path2/images/]
+train: /data2/data_backup/data/shw/VisDrone2019-DET-train/images
+val: /data2/data_backup/data/shw/VisDrone2019-DET-val/images
+
+# number of classes
+nc: 10
+
+# class names
+names: [
+'pedestrian',
+'people',
+'bicycle',
+'car',
+'van',
+'truck',
+'tricycle',
+'awning-tricycle',
+'bus',
+'motor'
+]
