@@ -365,6 +365,20 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                         f += [x.replace('./', parent) if x.startswith('./') else x for x in t]  # local to global path
                 else:
                     raise Exception('%s does not exist' % p)
+                    # filter night data
+            night_dir = ['17_17-42-00-17-45-00-wk',
+                         '17_17-45-00-17-48-00-jsy',
+                         '17_17-57-01-18-00-00-wk',
+                         '17_17-51-00-17-54-00-csy',
+                         '18_18-00-01-18-03-00-shw',
+                         '18_18-03-00-18-06-00-shw'
+                         ]
+            img_set = []
+            for img_p in f:
+                dir_name = img_p.split("/")[-2]
+                if dir_name not in night_dir:
+                    img_set.append(img_p)
+            f = img_set
             self.img_files = sorted([x.replace('/', os.sep) for x in f if x.split('.')[-1].lower() in img_formats])
             assert self.img_files, 'No images found'
         except Exception as e:
@@ -393,6 +407,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.shapes = np.array(shapes, dtype=np.float64)
         self.img_files = list(cache.keys())  # update
         self.label_files = img2label_paths(cache.keys())  # update
+
         if single_cls:
             for x in self.labels:
                 x[:, 0] = 0

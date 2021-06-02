@@ -5,7 +5,7 @@ import torch.utils.data
 import torch.nn as nn
 
 import test  # import test.py to get mAP after each epoch
-from models.yolo import *
+from models.yolo_prune import *
 from models.experimental import *
 from models.common import *
 from utils.datasets import *
@@ -66,7 +66,7 @@ def parse_model(d):
             except:
                 pass
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if n > 1 and m in [C3]:
+        if n > 1 and m in [C3,C3_Res_S]:
             grab_ifo_layer_idx.append(i)
             grab_ifo_layer_num.append(n)
             #grab_ifo.append({i:n})

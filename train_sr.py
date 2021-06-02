@@ -94,14 +94,18 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         model = Model(opt.cfg, ch=3, nc=nc).to(device)  # create
 
     # Freeze
-    freeze = []  # parameter names to freeze (full or partial)
-    for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
-        if any(x in k for x in freeze):
-            print('freezing %s' % k)
-            v.requires_grad = False
+    # freeze = []  # parameter names to freeze (full or partial)
+    # for k, v in model.named_parameters():
+    #     v.requires_grad = True  # train all layers
+    #     if any(x in k for x in freeze):
+    #         print('freezing %s' % k)
+    #         v.requires_grad = False
 
-    # Optimizer
+    # for k, v in model.named_parameters():
+    #     if not str(k).__contains__("9"):
+    #         v.requires_grad = False
+
+            # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
     hyp['weight_decay'] *= total_batch_size * accumulate / nbs  # scale weight_decay
@@ -231,6 +235,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Starting training for {epochs} epochs...')
 
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+
         opt_s = opt.s
         if opt.sr_cos:
             mask_period = 2
@@ -460,12 +465,12 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # /home/shw/code/yolov5-new/yolov5/models/yolov5l.pt
-    parser.add_argument('--weights', type=str, default='/home/shw/code/yolov5-new/yolov5/models/yolov5l.pt',
+    parser.add_argument('--weights', type=str, default='/home/shw/code/yolov5-new/yolov5/weights/yolov5s.pt',
                         help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='models/yolov5s-transformer.yaml', help='model.yaml path')
+    parser.add_argument('--cfg', type=str, default='./models/yolov5s.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[672, 672], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
@@ -477,7 +482,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
     parser.add_argument('--image-weights', action='store_true', help='use weighted image selection for training')
-    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
@@ -494,7 +499,7 @@ if __name__ == '__main__':
     parser.add_argument('--sr', action='store_true', default=False, help='Sparsity Training or not')
     parser.add_argument('--s', type=float, default=0.001, help='scale coefficient in updateBN')
     parser.add_argument('--sr_cos', action='store_true', default=False, help='Cosine Sparsity rate')
-    parser.add_argument('--modal_name', default='visible', help='which modal? lwir or visible')
+    parser.add_argument('--modal_name', default='lwir', help='which modal? lwir or visible')
     parser.add_argument('--base', type=int, default=100, help='base train')
     opt = parser.parse_args()
 

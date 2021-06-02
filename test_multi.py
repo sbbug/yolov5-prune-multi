@@ -56,9 +56,9 @@ def test(data,
         imgsz = check_img_size(imgsz, s=gs)  # check img_size
 
     # Half
-    half = device.type != 'cpu'  # half precision only supported on CUDA
-    if half:
-        model.half()
+    # half = device.type != 'cpu'  # half precision only supported on CUDA
+    # if half:
+    #    model.half()
 
     # Configure
     model.eval()
@@ -82,8 +82,9 @@ def test(data,
         if device.type != 'cpu':
             model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))  # run once
         task = opt.task if opt.task in ('train', 'val', 'test') else 'val'  # path to train/val/test images
-        dataloader = create_dataloader(os.path.join(data[task],opt.modal_name), imgsz, batch_size, gs, opt, pad=0.5, rect=True,
-                                      )[0]
+        dataloader = \
+            create_dataloader(os.path.join(data[task], opt.modal_name), imgsz, batch_size, gs, opt, pad=0.5, rect=True,
+                              )[0]
 
     seen = 0
     confusion_matrix = ConfusionMatrix(nc=nc)
@@ -94,33 +95,51 @@ def test(data,
     loss = torch.zeros(3, device=device)
     jdict, stats, ap, ap_class, wandb_images = [], [], [], [], []
     b_n_s = 0
+
+    aware = False
     for batch_i, (imgs, lwirs, img_aware, targets, paths,
-            shapes) in enumerate(tqdm(dataloader, desc=s)):
+                  shapes) in enumerate(tqdm(dataloader, desc=s)):
         b_n_s += 1
-        imgs = imgs.to(device, non_blocking=True)
-        imgs = imgs.half() if half else imgs.float()  # uint8 to fp16/32
-        lwirs = lwirs.to(device, non_blocking=True)
-        lwirs = lwirs.half() if half else lwirs.float()  # uint8 to fp16/32
-        lwirs /= 255.0  # 0 - 255 to 0.0 - 1.0
+        imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+        lwirs = lwirs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
+        img_aware = img_aware.to(device, non_blocking=True).float() / 255.0
+
         targets = targets.to(device)
         nb, _, height, width = imgs.shape  # batch size, channels, height, width
 
         with torch.no_grad():
             # Run model
+            # t = time_synchronized()
+            # out_vl, train_out_vl = model(imgs, lwirs)  # inference and training outputs
+            # t0 += time_synchronized() - t
+            # out = torch.cat((out_vs, out_lw), 1)
+
+            # three detect
             t = time_synchronized()
-            (out_vs, train_out_vs),(out_lw,train_out_lw) = model(imgs,lwirs)  # inference and training outputs
+            if aware:
+                out1, out2, out3 = model(imgs, lwirs)  # inference and training outputs  fusion  visible lwir
+            else:
+                out2, out3 = model(imgs, lwirs)  # inference and training outputs  fusion  visible lwir
+
+            # aware fusion
+            if aware:
+                aware_score = model.model_aware(img_aware)
+                for b_ix, s in enumerate(aware_score[..., 0]):
+                    out2[0][b_ix][:, 5:] = out2[0][b_ix][:, 5:] * s
+
             t0 += time_synchronized() - t
-            out = torch.cat((out_vs, out_lw), 1)
+            # out_vl = torch.cat((out1[0], out2[0], out3[0]), 1)
+            out_vl = torch.cat((out2[0], out3[0]), 1)
             # Compute loss
             if compute_loss:
-                loss += compute_loss([x.float() for x in train_out_vs], targets)[1][:3]  # box, obj, cls
-                loss += compute_loss([x.float() for x in train_out_lw], targets)[1][:3]  # box, obj, cls
+                loss += compute_loss([x.float() for x in train_out_vl], targets)[1][:3]  # box, obj, cls
+                # loss += compute_loss([x.float() for x in train_out_lw], targets)[1][:3]  # box, obj, cls
 
             # Run NMS
             targets[:, 2:] *= torch.Tensor([width, height, width, height]).to(device)  # to pixels
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
-            out = non_max_suppression(out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
+            out = non_max_suppression(out_vl, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb, multi_label=True)
             t1 += time_synchronized() - t
 
         # Statistics per image
@@ -284,7 +303,9 @@ def test(data,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/shw/code/yolov5-new/yolov5/runs/train/exp119/weights/best.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str,
+                        default='runs/train/exp322/weights/best.pt',
+                        help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
     parser.add_argument('--batch-size', type=int, default=1, help='size of each image batch')
@@ -323,5 +344,3 @@ if __name__ == '__main__':
          save_hybrid=opt.save_hybrid,
          save_conf=opt.save_conf,
          )
-
-

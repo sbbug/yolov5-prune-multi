@@ -127,6 +127,19 @@ def is_parallel(model):
     return type(model) in (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel)
 
 
+def intersect_dicts_multi(da, db, exclude=()):
+    # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
+    # return {k: v for k, v in da.items() if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape}
+    k_v = dict()
+    for k, v in da.items():
+        k = k.replace("model.", "")
+        if str(k).__contains__("anchors") or str(k).__contains__("anchor_grid"):
+            continue
+        if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape:
+            k_v[k] = v
+    return k_v
+
+
 def intersect_dicts(da, db, exclude=()):
     # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
     return {k: v for k, v in da.items() if k in db and not any(x in k for x in exclude) and v.shape == db[k].shape}
@@ -292,7 +305,9 @@ class ModelEMA:
     def update_attr(self, model, include=(), exclude=('process_group', 'reducer')):
         # Update EMA attributes
         copy_attr(self.ema, model, include, exclude)
-def model_info_raw(model, verbose=False, img_size=640):
+
+
+def model_info_raw(model, verbose=False, img_size=672):
     # Model information. img_size may be int or list, i.e. img_size=640 or img_size=[640, 320]
     n_p = sum(x.numel() for x in model.parameters())  # number parameters
     n_g = sum(x.numel() for x in model.parameters() if x.requires_grad)  # number gradients
@@ -315,7 +330,8 @@ def model_info_raw(model, verbose=False, img_size=640):
 
     logger.info(f"Model Summary: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")
 
-def model_info_multi(model, verbose=False, img_size=640):
+
+def model_info_multi(model, verbose=False, img_size=672):
     # Model information. img_size may be int or list, i.e. img_size=640 or img_size=[640, 320]
     n_p = sum(x.numel() for x in model.parameters())  # number parameters
     n_g = sum(x.numel() for x in model.parameters() if x.requires_grad)  # number gradients
@@ -332,10 +348,31 @@ def model_info_multi(model, verbose=False, img_size=640):
     img = torch.zeros((1, 3, stride, stride), device=next(model.parameters()).device)  # input
     lwir = torch.zeros((1, 3, stride, stride), device=next(model.parameters()).device)  # input
     aware = torch.zeros((1, 3, 128, 128), device=next(model.parameters()).device)  # input
-    flops = profile(deepcopy(model), inputs=(img,lwir,aware), verbose=False)[0] / 1E9 * 2  # stride FLOPS
+    flops = profile(deepcopy(model), inputs=(img, lwir, aware), verbose=False)[0] / 1E9 * 2  # stride FLOPS
     img_size = img_size if isinstance(img_size, list) else [img_size, img_size]  # expand if int/float
     fs = ', %.1f GFLOPS' % (flops * img_size[0] / stride * img_size[1] / stride)  # 640x640 FLOPS
     # except (ImportError, Exception):
     #     fs = ''
+
+    logger.info(f"Model Summary: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")
+
+
+def model_info_multi_no_aware(model, verbose=False, img_size=672):
+    n_p = sum(x.numel() for x in model.parameters())  # number parameters
+    n_g = sum(x.numel() for x in model.parameters() if x.requires_grad)  # number gradients
+    if verbose:
+        print('%5s %40s %9s %12s %20s %10s %10s' % ('layer', 'name', 'gradient', 'parameters', 'shape', 'mu', 'sigma'))
+        for i, (name, p) in enumerate(model.named_parameters()):
+            name = name.replace('module_list.', '')
+            print('%5g %40s %9s %12g %20s %10.3g %10.3g' %
+                  (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
+
+    from thop import profile
+    stride = int(model.stride.max()) if hasattr(model, 'stride') else 32
+    img = torch.zeros((1, 3, stride, stride), device=next(model.parameters()).device)  # input
+    lwir = torch.zeros((1, 3, stride, stride), device=next(model.parameters()).device)  # input
+    flops = profile(deepcopy(model), inputs=(img, lwir), verbose=False)[0] / 1E9 * 2  # stride FLOPS
+    img_size = img_size if isinstance(img_size, list) else [img_size, img_size]  # expand if int/float
+    fs = ', %.1f GFLOPS' % (flops * img_size[0] / stride * img_size[1] / stride)  # 640x640 FLOPS
 
     logger.info(f"Model Summary: {len(list(model.modules()))} layers, {n_p} parameters, {n_g} gradients{fs}")

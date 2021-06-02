@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from utils.general import xyxy2xywh, xywh2xyxy
 from utils.torch_utils import torch_distributed_zero_first
-
+import utils.datasets as datasets
 # Parameters
 help_url = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
 img_formats = ['bmp', 'jpg', 'jpeg', 'png', 'tif', 'tiff', 'dng']  # acceptable image suffixes
@@ -122,7 +122,76 @@ class _RepeatSampler(object):
         while True:
             yield from iter(self.sampler)
 
+class LoadImages:  # for inference
+    def __init__(self, path, img_size=640, stride=32):
+        p = str(Path(path).absolute())  # os-agnostic absolute path
+        if '*' in p:
+            files = sorted(glob.glob(p, recursive=True))  # glob
+        elif os.path.isdir(p):
+            files = sorted(glob.glob(os.path.join(p, '*.*')))  # dir
+        elif os.path.isfile(p):
+            files = [p]  # files
+        else:
+            raise Exception(f'ERROR: {p} does not exist')
 
+        visible = [x for x in files if x.split('.')[-1].lower() in img_formats]
+        lwir = [x.replace("visible","lwir") for x in visible]
+        videos = [x for x in files if x.split('.')[-1].lower() in vid_formats]
+        ni, nv = len(visible), len(videos)
+
+        self.img_size = img_size
+        self.files_v = visible
+        self.files_l = lwir
+        self.nf = ni  # number of files
+        self.video_flag = [False] * ni
+        self.mode = 'images'
+        self.stride = stride
+        self.video_flag = [False] * ni
+        if any(videos):
+            self.new_video(videos[0])  # new video
+        else:
+            self.cap = None
+        assert self.nf > 0, f'No images or videos found in {p}. ' \
+                            f'Supported formats are:\nimages: {img_formats}\nvideos: {vid_formats}'
+
+    def __iter__(self):
+        self.count = 0
+        return self
+
+    def __next__(self):
+        if self.count == self.nf:
+            raise StopIteration
+        path_v = self.files_v[self.count]
+        path_l = self.files_l[self.count]
+
+        self.count += 1
+        img0_v = cv2.imread(path_v)  # BGR
+        img0_l = cv2.imread(path_l)
+        assert img0_v is not None, 'Image Not Found ' + path_v
+        print('image %g/%g %s: ' % (self.count, self.nf, path_v), end='')
+
+        # Padded resize
+        img_v = datasets.letterbox(img0_v, self.img_size, stride=self.stride)[0]
+        img_l = datasets.letterbox(img0_l, self.img_size, stride=self.stride)[0]
+        # Convert
+        # Convert
+        img_v = img_v[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img_v = np.ascontiguousarray(img_v)
+
+        img_l = img_l[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img_l = np.ascontiguousarray(img_l)
+
+        return path_v, img0_v, img_v, img_l
+
+    def new_video(self, path):
+        self.frame = 0
+        self.cap = cv2.VideoCapture(path)
+        self.nframes = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    def __len__(self):
+        return self.nf  # number of files
+
+'''
 class LoadImages:  # for inference
     def __init__(self, path, img_size=640):
         p = str(Path(path))  # os-agnostic
@@ -136,14 +205,16 @@ class LoadImages:  # for inference
         else:
             raise Exception('ERROR: %s does not exist' % p)
 
-        images = [x for x in files if x.split('.')[-1].lower() in img_formats]
+        visible = [x for x in files if x.split('.')[-1].lower() in img_formats]
+        lwir = [img2label_paths(x) for x in files if x.split('.')[-1].lower() in img_formats]
         videos = [x for x in files if x.split('.')[-1].lower() in vid_formats]
-        ni, nv = len(images), len(videos)
+        ni, nv = len(visible), len(videos)
 
         self.img_size = img_size
-        self.files = images + videos
-        self.nf = ni + nv  # number of files
-        self.video_flag = [False] * ni + [True] * nv
+        self.files_v = visible
+        self.files_l = lwir
+        self.nf = ni  # number of files
+        self.video_flag = [False] * ni
         self.mode = 'images'
         if any(videos):
             self.new_video(videos[0])  # new video
@@ -159,40 +230,28 @@ class LoadImages:  # for inference
     def __next__(self):
         if self.count == self.nf:
             raise StopIteration
-        path = self.files[self.count]
-
-        if self.video_flag[self.count]:
-            # Read video
-            self.mode = 'video'
-            ret_val, img0 = self.cap.read()
-            if not ret_val:
-                self.count += 1
-                self.cap.release()
-                if self.count == self.nf:  # last video
-                    raise StopIteration
-                else:
-                    path = self.files[self.count]
-                    self.new_video(path)
-                    ret_val, img0 = self.cap.read()
-
-            self.frame += 1
-            print('video %g/%g (%g/%g) %s: ' % (self.count + 1, self.nf, self.frame, self.nframes, path), end='')
-
-        else:
-            # Read image
-            self.count += 1
-            img0 = cv2.imread(path)  # BGR
-            assert img0 is not None, 'Image Not Found ' + path
-            print('image %g/%g %s: ' % (self.count, self.nf, path), end='')
+        path_v = self.files_v[self.count]
+        path_l = self.files_l[self.count]
+        # Read image
+        self.count += 1
+        img0_v = cv2.imread(path_v)  # BGR
+        img0_l = cv2.imread(path_l)
+        assert img0_v is not None, 'Image Not Found ' + path_v
+        print('image %g/%g %s: ' % (self.count, self.nf, path_v), end='')
 
         # Padded resize
-        img = letterbox(img0, new_shape=self.img_size)[0]
+        img_v = letterbox(img0_v, new_shape=self.img_size)[0]
+        img_l = letterbox(img0_l, new_shape=self.img_size)[0]
 
         # Convert
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
-        img = np.ascontiguousarray(img)
+        img_v = img_v[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img_v = np.ascontiguousarray(img_v)
 
-        return path, img, img0, self.cap
+        img_l = img_l[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img_l = np.ascontiguousarray(img_l)
+
+
+        return path_v,img0_v,img_v,img_l
 
     def new_video(self, path):
         self.frame = 0
@@ -201,7 +260,7 @@ class LoadImages:  # for inference
 
     def __len__(self):
         return self.nf  # number of files
-
+'''
 
 class LoadWebcam:  # for inference
     def __init__(self, pipe='0', img_size=640):
@@ -504,7 +563,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img, lwir, (h0, w0), (h, w), img_aware = load_image(self, index)
 
         # Letterbox
-        shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+        # shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
+        shape = self.img_size
         img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
         lwir, ratio, pad = letterbox(lwir, shape, auto=False, scaleup=self.augment)
         shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling

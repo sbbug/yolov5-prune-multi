@@ -5,7 +5,7 @@ import torch.utils.data
 import torch.nn as nn
 
 import test  # import test.py to get mAP after each epoch
-from models.yolo import *
+from models.yolo_prune import *
 from models.experimental import *
 from models.common import *
 from utils.datasets import *
@@ -66,7 +66,7 @@ def parse_model(d):
             except:
                 pass
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
-        if n > 1 and m in [C3]:
+        if n > 1 and m in [C3,C3_Res_S]:
             grab_ifo_layer_idx.append(i)
             grab_ifo_layer_num.append(n)
             #grab_ifo.append({i:n})
@@ -223,7 +223,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--batch-size', type=int, default=8, help="Total batch size for all gpus.")
     parser.add_argument("--save", default='/home/shw/code/yolov5-new/yolov5/runs/train/exp89', type=str, help='path to save pruned model (default: none)')
-    parser.add_argument("--overall_layers", default=32, type=int, help='pruning layers')
+    parser.add_argument("--overall_layers", default=33, type=int, help='pruning layers')
     opt = parser.parse_args()
 
     opt.save += "/_{}".format(opt.overall_layers)

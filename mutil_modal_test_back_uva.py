@@ -12,9 +12,9 @@ from utils.general import check_dataset, check_file, box_iou, \
     non_max_suppression, scale_coords, xywh2xyxy, set_logging, increment_path
 from utils.metrics import ap_per_class, ConfusionMatrix
 from utils.plots import plot_images, output_to_target
-from utils.torch_utils import select_device, time_synchronized
-# from models.modal_ensemble_model_uva import ModalEnseModel
-from models.modal_ensemble_model_uva_aware import ModalEnseModel
+from utils.torch_utils import select_device, time_synchronized,model_info_multi_no_aware
+from models.modal_ensemble_model_uva import ModalEnseModel
+# from models.modal_ensemble_model_uva_aware import ModalEnseModel
 from utils.torch_utils import model_info_multi
 
 def test(data,
@@ -46,7 +46,7 @@ def test(data,
 
     # Load model
 
-    model = ModalEnseModel(opt.aware)
+    model = ModalEnseModel()
     model.load_weights(weights_visible, weights_lwir, device)
     # model = model.to(device)
     imgsz = model.check_img_shape(imgsz)
@@ -58,9 +58,7 @@ def test(data,
     # model_lwir.half()
     # model.half()
 
-    # Configure
-
-    model_info_multi(model,img_size=imgsz)
+    model_info_multi_no_aware(model,verbose=False)
 
     model.eval()
 
@@ -103,6 +101,7 @@ def test(data,
     # flag = False
     # y = None
     print(len(dataloader))
+    sample_len = len(dataloader)
     n_s = 0
     for batch_i, (img, lwir, img_aware, targets, paths, shapes) in enumerate(tqdm(dataloader, desc=s)):
         n_s += 1
@@ -127,7 +126,7 @@ def test(data,
             # Run model
             t = time_synchronized()
             # print(img.shape, lwir.shape)
-            inf_out = model(img, lwir, img_aware, augment=augment)
+            inf_out = model(img, lwir, augment=augment)
             t0 += time_synchronized() - t
 
             # Run NMS
@@ -135,6 +134,8 @@ def test(data,
             lb = [targets[targets[:, 0] == i, 1:] for i in range(nb)] if save_hybrid else []  # for autolabelling
             t = time_synchronized()
             output = non_max_suppression(inf_out, conf_thres=conf_thres, iou_thres=iou_thres, labels=lb)
+            # output = inf_out
+            # print(output)
             t1 += time_synchronized() - t
 
         # Statistics per image
@@ -152,6 +153,7 @@ def test(data,
 
             # Predictions
             predn = pred.clone()
+            # shapes = (h0, w0), ((h / h0, w / w0), pad)
             scale_coords(img[si].shape[1:], predn[:, :4], shapes[si][0], shapes[si][1])  # native-space pred
 
             # Append to text file
@@ -242,7 +244,7 @@ def test(data,
     t = tuple(x / seen * 1E3 for x in (t0, t1, t0 + t1)) + (imgsz, imgsz, batch_size)  # tuple
 
     print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
-    print((3354 / t0), (3354 / t1), (3354 / (t0 + t1)))
+    print((sample_len*batch_size / t0), (sample_len*batch_size / t1), (sample_len*batch_size / (t0 + t1)))
     # Plots
     if plots:
         confusion_matrix.plot(save_dir=save_dir, names=list(names.values()))
@@ -274,23 +276,23 @@ def test(data,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
     parser.add_argument('--weights_visible', nargs='+', type=str,
-                        default='runs/train/exp87/weights/best.pt',
+                        default='runs/train/exp88/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--weights_lwir', nargs='+', type=str,
-                        default='runs/train/exp86/weights/best.pt',
+                        default='runs/train/exp89/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='*.data path')
     parser.add_argument('--batch-size', type=int, default=8, help='size of each image batch')
     parser.add_argument('--img-size', type=int, default=672, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.001, help='object confidence threshold')
-    parser.add_argument('--iou-thres', type=float, default=0.6, help='IOU threshold for NMS')
-    parser.add_argument('--task', default='test', help="'val', 'test', 'study'")
+    parser.add_argument('--iou-thres', type=float, default=0.5, help='IOU threshold for NMS')
+    parser.add_argument('--task', default='val', help="'val', 'test', 'study'")
     parser.add_argument('--device', default='3', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--single-cls', action='store_true', help='treat as single-class dataset')
     parser.add_argument('--augment', action='store_true', help='augmented inference')
     parser.add_argument('--verbose', action='store_true', help='report mAP by class')
     parser.add_argument('--save-txt', action='store_true', default=False, help='save results to *.txt')
-    parser.add_argument('--aware', action='store_true', default=True, help='save results to *.txt')
+    parser.add_argument('--aware', action='store_true', default=False, help='save results to *.txt')
     parser.add_argument('--save-hybrid', action='store_true', help='save label+prediction hybrid results to *.txt')
     parser.add_argument('--save-conf', action='store_true', help='save confidences in --save-txt labels')
     parser.add_argument('--project', default='runs/test', help='save to project/name')

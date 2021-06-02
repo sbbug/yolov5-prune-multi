@@ -9,17 +9,19 @@ import models
 from models.experimental import attempt_load
 from utils.activations import Hardswish
 from utils.general import set_logging, check_img_size
-from models.modal_ensemble_model_uva import ModalEnseModel
+from models.modal_ensemble_model_uva_aware import ModalEnseModel
 from utils.torch_utils import select_device
 from torch.autograd import Variable
+import cv2
+from torchvision.transforms import Resize
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--weights_visible', nargs='+', type=str,
-                        default='/home/shw/code/yolov5-new/yolov5/runs/train/exp87/weights/best.pt',
+                        default='/home/shw/code/yolov5-new/yolov5/runs/train/exp371/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--weights_lwir', nargs='+', type=str,
-                        default='/home/shw/code/yolov5-new/yolov5/runs/train/exp86/weights/best.pt',
+                        default='/home/shw/code/yolov5-new/yolov5/runs/train/exp372/weights/best.pt',
                         help='model.pt path(s)')
     parser.add_argument('--img-size', nargs='+', type=int, default=[672, 672], help='image size')  # height, width
     parser.add_argument('--batch-size', type=int, default=1, help='batch size')
@@ -29,10 +31,10 @@ if __name__ == '__main__':
     set_logging()
     t = time.time()
 
-    device = select_device('3')
+    device = select_device('0')
 
     # Load PyTorch model
-    model = ModalEnseModel()
+    model = ModalEnseModel(True)
     model.load_weights(opt.weights_visible, opt.weights_lwir, device)
 
     # model = attempt_load(opt.weights_visible, map_location=device)  # load FP32 model
@@ -45,6 +47,7 @@ if __name__ == '__main__':
     # Input
     img = torch.zeros(opt.batch_size, 3, *opt.img_size)  # image size(1,3,320,192) iDetection
     lwir = torch.zeros(opt.batch_size, 3, *opt.img_size)
+    img_rs = torch.zeros(opt.batch_size, 3, 128, 128)
     # Update model
     # for k, m in model.named_modules():
     #     m._non_persistent_buffers_set = set()  # pytorch 1.6.0 compatibility
@@ -65,11 +68,12 @@ if __name__ == '__main__':
     lwir = lwir.float()
     lwir /= 255.0  # 0 - 255 to 0.0 - 1.0
 
-    # lwir = Variable(lwir.to(device))
-    # y = model(img,augment=False)  # dry run
+    img_aware = img_rs.to(device, non_blocking=True)
+    img_aware = img_aware.float()
+    img_aware /= 255.0
 
     model.export()
-    y = model(img, lwir, augment=False)  # dry run
+    y = model(img, lwir, img_aware, augment=False)  # dry run
 
     # ONNX export
     try:
@@ -77,10 +81,12 @@ if __name__ == '__main__':
 
         print('\nStarting ONNX export with onnx %s...' % onnx.__version__)
         f = opt.weights_visible.replace('.pt', '.onnx')  # filename
-        torch.onnx.export(model, (img, lwir), f, verbose=True, opset_version=10, input_names=['img', 'lwir'],
+        torch.onnx.export(model, (img, lwir, img_aware), f, verbose=True, opset_version=10,
+                          input_names=['img', 'lwir', 'img_aware'],
                           output_names=['classes', 'boxes'] if y is None else ['img_scale_1', 'img_scale_2',
                                                                                'img_scale_3', 'lwir_scale_1',
-                                                                               'lwir_scale_2', 'lwir_scale_3'])
+                                                                               'lwir_scale_2', 'lwir_scale_3',
+                                                                               'aware_score'])
 
         # Checks
         onnx_model = onnx.load(f)  # load onnx model

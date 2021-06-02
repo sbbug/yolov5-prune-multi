@@ -35,10 +35,20 @@ prune_layer:
     yolov5s-visible   87            91     100       6
     yolov5s-lwir      86            92     100       6
 
+    yolov5s-visible   87            371    100       2
+    yolov5s-lwir      86            372    100       2
+
+    yolov5s-visible   87            384    100       4
+    yolov5s-lwir      86            385    100       4
+
+
+
     yolov5l-visible   88            117    100       32
+    yolov5l-visible   88            374    100       33
     yolov5l-visible   88            118    100       36
 
     yolov5l-lwir      89            120    100       32
+    yolov5l-lwir      89            375    100       33
     yolov5l-lwir      89            119    100       36
 
 C3-Res-S新模块引入：
@@ -56,9 +66,27 @@ exp   modal    datasets    引入transformer
 87    visible  mm-uva      引入前
 146   visible  mm-uva      引入后
 
+194   visible  mm-uva      no-layer-normal
+
+195   visible  mm-uva      TransformerLayer-new
 
 特征检测尺度平移：
 exp    dataset
 96     uva         使用exp=86
 XX     tiny-person 失败
 113    visdrone   平移前
+
+
+yolov5s下验证Transformer与C3-Res-S
+epoch   module     exp
+100     C3-Res-S   224
+
+50      C3-Res-S
+50      Transformer
+
+
+端到端训练融合：
+model                 exp    epoch
+
+vis+lw                368    40
+vis+lw                369    40

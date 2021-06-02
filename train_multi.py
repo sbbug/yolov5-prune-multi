@@ -31,7 +31,8 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
 from utils.google_utils import attempt_download
 from utils.loss_multi import ComputeLoss
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
-from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first
+from utils.torch_utils import ModelEMA, select_device, intersect_dicts, intersect_dicts_multi, \
+    torch_distributed_zero_first
 from functions import gather_bn_weights
 from sparsity import updateBN, maskBN
 
@@ -40,8 +41,9 @@ logger = logging.getLogger(__name__)
 
 def train(hyp, opt, device, tb_writer=None, wandb=None):
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
-    save_dir, epochs, batch_size, total_batch_size, weights, rank = \
-        Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank
+    save_dir, epochs, batch_size, total_batch_size, weights_vis, weights_lw, rank = \
+        Path(
+            opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights_visible, opt.weights_lwir, opt.global_rank
 
     # Directories
     wdir = save_dir / 'weights'
@@ -71,36 +73,54 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
     # Model
-    pretrained = weights.endswith('.pt')
+    pretrained = weights_vis.endswith('.pt')
     if pretrained:
-        with torch_distributed_zero_first(rank):
-            attempt_download(weights)  # download if not found locally
-        ckpt = torch.load(weights, map_location=device)  # load checkpoint
+
+        ckpt_vis = torch.load(weights_vis, map_location=device)  # load checkpoint
+        ckpt_lw = torch.load(weights_lw, map_location=device)  # load checkpoint
         if hyp.get('anchors'):
-            ckpt['model'].yaml['anchors'] = round(hyp['anchors'])  # force autoanchor
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc).to(device)  # create
+            ckpt_vis['model'].yaml['anchors'] = round(hyp['anchors'])  # force autoanchor
+            ckpt_lw['model'].yaml['anchors'] = round(hyp['anchors'])  # force autoanchor
+        model = Model(opt.cfg or ckpt_vis['model'].yaml, ch=3, nc=nc, device=device).to(device)  # create
         try:
             exclude = []
-            state_dict = ckpt['model']  # FP32
-            state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
+            state_dict_vis = ckpt_vis['model']  # FP32
+            state_dict_vis = intersect_dicts(state_dict_vis, model.model_vs.state_dict(), exclude=exclude)  # intersect
+
+            state_dict_lw = ckpt_lw['model']  # FP32
+            state_dict_lw = intersect_dicts(state_dict_lw, model.model_lw.state_dict(), exclude=exclude)  # intersect
         except:
             exclude = ['anchor'] if opt.cfg or hyp.get('anchors') else []  # exclude keys
-            state_dict = ckpt['model'].float().state_dict()  # to FP32
-            state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
+            state_dict_vis = ckpt_vis['model'].float().state_dict()  # to FP32
 
-        model.load_state_dict(state_dict, strict=False)  # load
-        logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
+            anchors = state_dict_vis['model.24.anchors']
+            anchor_grid = state_dict_vis['model.24.anchor_grid']
+
+            state_dict_vis = intersect_dicts_multi(state_dict_vis, model.model_vs.state_dict(),
+                                                   exclude=exclude)  # intersect
+            # state_dict_vis['24.anchors'] = anchor
+            # state_dict_vis['24.anchor_grid'] = stride
+
+            state_dict_lw = ckpt_lw['model'].float().state_dict()  # to FP32
+            state_dict_lw = intersect_dicts_multi(state_dict_lw, model.model_lw.state_dict(),
+                                                  exclude=exclude)  # intersect
+            # state_dict_lw['24.anchors'] = anchor
+            # state_dict_lw['24.anchor_grid'] = stride
+            model.detect.anchor_grid = anchor_grid
+
+        # model.load_state_dict(state_dict, strict=False)  # load
+        model.load_state_para(state_dict_vis, state_dict_lw)
+        # logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
         model = Model(opt.cfg, ch=3, nc=nc).to(device)  # create
 
-    # Freeze
-    freeze = []  # parameter names to freeze (full or partial)
-    for k, v in model.named_parameters():
-        v.requires_grad = True  # train all layers
-        if any(x in k for x in freeze):
-            print('freezing %s' % k)
-            v.requires_grad = False
 
+    for k, v in model.model_vs.named_parameters():
+        v.requires_grad = False
+    for k, v in model.model_lw.named_parameters():
+        v.requires_grad = False
+    # for k, v in model.model_aware.named_parameters():
+    #     v.requires_grad = False
     # Optimizer
     nbs = 64  # nominal batch size
     accumulate = max(round(nbs / total_batch_size), 1)  # accumulate loss before optimizing
@@ -138,7 +158,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         wandb_run = wandb.init(config=opt, resume="allow",
                                project='YOLOv5' if opt.project == 'runs/train' else Path(opt.project).stem,
                                name=save_dir.stem,
-                               id=ckpt.get('wandb_id') if 'ckpt' in locals() else None)
+                               id=ckpt_vis.get('wandb_id') if 'ckpt' in locals() else None)
     loggers = {'wandb': wandb}  # loggers dict
 
     # Resume
@@ -149,14 +169,14 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             assert start_epoch > 0, '%s training to %g epochs is finished, nothing to resume.' % (weights, epochs)
         if epochs < start_epoch:
             logger.info('%s has been trained for %g epochs. Fine-tuning for %g additional epochs.' %
-                        (weights, ckpt['epoch'], epochs))
-            epochs += ckpt['epoch']  # finetune additional epochs
+                        (weights_vis, ckpt_vis['epoch'], epochs))
+            epochs += ckpt_vis['epoch']  # finetune additional epochs
 
-        del ckpt, state_dict
+        del ckpt_vis, state_dict_vis, ckpt_lw, state_dict_lw
 
     # Image sizes
     gs = int(model.stride.max())  # grid size (max stride)
-    nl = model.model_vs[-1].nl + model.model_lw[-1].nl# number of detection layers (used for scaling hyp['obj'])
+    nl = model.detect.nl  # number of detection layers (used for scaling hyp['obj'])
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
     # DP mode
@@ -209,7 +229,7 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
     # Model parameters
     hyp['box'] *= 3. / nl  # scale to layers
     hyp['cls'] *= nc / 80. * 3. / nl  # scale to classes and layers
-    hyp['obj'] *= (imgsz / 640) ** 2 * 3. / nl  # scale to image size and layers
+    hyp['obj'] *= (imgsz / 672) ** 2 * 3. / nl  # scale to image size and layers
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
     model.gr = 1.0  # iou loss ratio (obj_loss = 1.0 or iou)
@@ -231,6 +251,13 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                 f'Starting training for {epochs} epochs...')
 
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
+
+        if epoch > 40:
+            for k, v in model.model_vs.named_parameters():
+                v.requires_grad = True  # train all layers
+            for k, v in model.model_lw.named_parameters():
+                v.requires_grad = True  # train all layers
+
         opt_s = opt.s
         if opt.sr_cos:
             mask_period = 2
@@ -259,6 +286,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
         mloss = torch.zeros(4, device=device)  # mean losses
+        mloss1 = torch.zeros(4, device=device)  # mean losses
+        mloss2 = torch.zeros(4, device=device)  # mean losses
+        mloss3 = torch.zeros(4, device=device)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
@@ -268,6 +298,8 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         optimizer.zero_grad()
         for i, (imgs, lwirs, img_aware, targets, paths,
                 shapes) in pbar:  # batch -------------------------------------------------------------
+            # if epoch == 0:
+            #     break
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
             lwirs = lwirs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
@@ -301,11 +333,28 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             #         loss *= opt.world_size  # gradient averaged between devices in DDP mode
             #     if opt.quad:
             #         loss *= 4.
-            pred_vs, pred_lw = model(imgs, lwirs)  # forward
-            loss_vs, loss_items_vs = compute_loss(pred_vs, targets.to(device))  # loss scaled by batch_size
-            loss_lw, loss_items_lw = compute_loss(pred_lw, targets.to(device))
-            loss = (loss_vs + loss_lw)
-            loss_items = (loss_items_vs + loss_items_lw)
+            # pred_vs, pred_lw = model(imgs, lwirs)  # forward
+            # loss_vs, loss_items_vs = compute_loss(pred_vs, targets.to(device))  # loss scaled by batch_size
+            # loss_lw, loss_items_lw = compute_loss(pred_lw, targets.to(device))
+            # loss = (model.p * loss_vs + model.q * loss_lw)
+            # loss = loss_lw+loss_vs
+            # loss_items = (loss_items_vs + loss_items_lw)
+
+            #
+            # pred = model(imgs, lwirs)
+            # loss, loss_items = compute_loss(pred, targets.to(device))
+
+            pred2, pred3 = model(imgs, lwirs)
+            # loss1, loss_items_1 = compute_loss(pred1, targets.to(device))
+            loss2, loss_items_2 = compute_loss(pred2, targets.to(device))
+            loss3, loss_items_3 = compute_loss(pred3, targets.to(device))
+
+            # loss = (0.0 * loss1 + 0.5 * loss2 + 0.5 * loss3)
+            # loss_items = (0.0 * loss_items_1  + 0.5 * loss_items_2 + 0.5 * loss_items_3)
+
+            loss = (0.5 * loss2 + 0.5 * loss3)
+            loss_items = (0.5 * loss_items_2 + 0.5 * loss_items_3)
+
             if rank != -1:
                 loss *= opt.world_size  # gradient averaged between devices in DDP mode
             if opt.quad:
@@ -328,6 +377,9 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             # Print
             if rank in [-1, 0]:
                 mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                # mloss1 = (mloss1 * i + loss_items_1) / (i + 1)  # update mean losses
+                mloss2 = (mloss2 * i + loss_items_2) / (i + 1)  # update mean losses
+                mloss3 = (mloss3 * i + loss_items_3) / (i + 1)  # update mean losses
                 mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
                 s = ('%10s' * 2 + '%10.4g' * 6) % (
                     '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
@@ -344,6 +396,12 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     wandb.log({"Mosaics": [wandb.Image(str(x), caption=x.name) for x in save_dir.glob('train*.jpg')
                                            if x.exists()]})
 
+            # vis p q
+            # tb_writer.add_histogram('coe/p', model.p.cpu().detach().numpy(), ni, bins='doane')
+            # tb_writer.add_histogram('coe/q', model.q.cpu().detach().numpy(), ni, bins='doane')
+            # tb_writer.add_scalar('coe/p', model.p.cpu().detach().numpy(), ni)
+            # tb_writer.add_scalar('coe/q', model.q.cpu().detach().numpy(), ni)
+            # break
             # end batch ------------------------------------------------------------------------------------------------
         # end epoch ----------------------------------------------------------------------------------------------------
 
@@ -359,16 +417,16 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
                 results, maps, times = test_multi.test(opt.data,
-                                                 batch_size=total_batch_size,
-                                                 imgsz=imgsz_test,
-                                                 model=ema.ema,
-                                                 single_cls=opt.single_cls,
-                                                 dataloader=testloader,
-                                                 save_dir=save_dir,
-                                                 verbose=nc < 50 and final_epoch,
-                                                 plots=plots and final_epoch,
-                                                 log_imgs=opt.log_imgs if wandb else 0,
-                                                 compute_loss=compute_loss)
+                                                       batch_size=total_batch_size,
+                                                       imgsz=imgsz_test,
+                                                       model=ema.ema,
+                                                       single_cls=opt.single_cls,
+                                                       dataloader=testloader,
+                                                       save_dir=save_dir,
+                                                       verbose=nc < 50 and final_epoch,
+                                                       plots=plots and final_epoch,
+                                                       log_imgs=opt.log_imgs if wandb else 0,
+                                                       compute_loss=None)
 
             # Write
             with open(results_file, 'a') as f:
@@ -386,6 +444,17 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
                     tb_writer.add_scalar(tag, x, epoch)  # tensorboard
                 if wandb:
                     wandb.log({tag: x})  # W&B
+
+            tb_writer.add_scalars('fusion-visible-lwir',
+                                  {'vis+lw': mloss[-1], 'visible': mloss2[-1], 'lwir': mloss3[-1]}, epoch)
+
+            tagss = ['box_loss', 'obj_loss', "cls_loss"
+                     ]
+            for idx in range(3):
+                if tb_writer:
+                    tb_writer.add_scalars("each-modal-loss/" + tagss[idx],
+                                          {'vis+lw': mloss1[idx], 'vis': mloss2[idx], 'lw': mloss3[idx]},
+                                          epoch)  # tensorboard
 
             bn_weights = gather_bn_weights(model)
             print("**" * 10, torch.mean(bn_weights).item())
@@ -442,17 +511,17 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
         logger.info('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
         if opt.data.endswith('coco.yaml') and nc == 80:  # if COCO
             for conf, iou, save_json in ([0.25, 0.45, False], [0.001, 0.65, True]):  # speed, mAP tests
-                results, _, _ = test.test(opt.data,
-                                          batch_size=total_batch_size,
-                                          imgsz=imgsz_test,
-                                          conf_thres=conf,
-                                          iou_thres=iou,
-                                          model=attempt_load(final, device).half(),
-                                          single_cls=opt.single_cls,
-                                          dataloader=testloader,
-                                          save_dir=save_dir,
-                                          save_json=save_json,
-                                          plots=False)
+                results, _, _ = test_multi.test(opt.data,
+                                                batch_size=total_batch_size,
+                                                imgsz=imgsz_test,
+                                                conf_thres=conf,
+                                                iou_thres=iou,
+                                                model=attempt_load(final, device).half(),
+                                                single_cls=opt.single_cls,
+                                                dataloader=testloader,
+                                                save_dir=save_dir,
+                                                save_json=save_json,
+                                                plots=False)
 
     else:
         dist.destroy_process_group()
@@ -465,14 +534,18 @@ def train(hyp, opt, device, tb_writer=None, wandb=None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # /home/shw/code/yolov5-new/yolov5/models/yolov5l.pt
-    parser.add_argument('--weights', type=str, default='',
-                        help='initial weights path')
+    parser.add_argument('--weights_visible', nargs='+', type=str,
+                        default='runs/train/exp87/weights/best.pt',
+                        help='model.pt path(s)')
+    parser.add_argument('--weights_lwir', nargs='+', type=str,
+                        default='runs/train/exp86/weights/best.pt',
+                        help='model.pt path(s)')
     parser.add_argument('--cfg', type=str,
-                        default='models/yolov5s.yaml',
+                        default='models/yolov5s_medium_fusion.yaml',
                         help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/uva.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='data/hyp.uva.yaml', help='hyperparameters path')
-    parser.add_argument('--epochs', type=int, default=100)
+    parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--batch-size', type=int, default=8, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[672, 672], help='[train, test] image sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')

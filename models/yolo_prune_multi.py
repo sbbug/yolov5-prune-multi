@@ -13,11 +13,13 @@ import math
 import torch
 import torch.nn as nn
 import yaml
+from models.SE import SE, Fus, PAM_Module
+from models.aware_model import AwareModel
 
 sys.path.append('./')  # to run '$ python *.py' files in subdirectories
 logger = logging.getLogger(__name__)
 
-from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS, autoShape, C3
+from models.common import Conv, Bottleneck, SPP, DWConv, Focus, BottleneckCSP, Concat, NMS, autoShape, C3_Res_S
 from models.experimental import MixConv2d, CrossConv
 from utils.autoanchor import check_anchor_order
 from utils.general import make_divisible, check_file, set_logging
@@ -28,6 +30,12 @@ try:
     import thop  # for FLOPS computation
 except ImportError:
     thop = None
+
+ANCHORS = [
+    [10, 13, 16, 30, 33, 23],  # P3/8
+    [30, 61, 62, 45, 59, 119],  # P4/16
+    [116, 90, 156, 198, 373, 326]
+]
 
 
 class Detect(nn.Module):
@@ -55,6 +63,7 @@ class Detect(nn.Module):
                 x[i] = x[i].permute(0, 2, 3, 1).contiguous()
             return x
         else:
+            # stride = torch.tensor([8, 16, 32])
             # x = x.copy()  # for profiling
             z = []  # inference output
             self.training |= self.export
@@ -82,7 +91,8 @@ class Detect(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None,
+                 device=None):  # model, input channels, number of classes
         super(Model, self).__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
@@ -91,6 +101,12 @@ class Model(nn.Module):
             self.yaml_file = Path(cfg).name
             with open(cfg) as f:
                 self.yaml = yaml.load(f, Loader=yaml.SafeLoader)  # model dict
+
+        # whether to aware
+        self.aware = False
+        self.model_aware_path = "/home/shw/code/yolov5-master/runs/aware_model/aware.pth"
+
+        self.fuse = False
 
         # Define model
         ch = self.yaml['ch'] = self.yaml.get('ch', ch)  # input channels
@@ -105,26 +121,54 @@ class Model(nn.Module):
         self.names = [str(i) for i in range(self.yaml['nc'])]  # default names
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
-        # Build strides, anchors
-        detect_vs = self.model_vs[-1]  # Detect()
-        detect_lw = self.model_lw[-1]
-        if isinstance(detect_vs, Detect) and isinstance(detect_lw, Detect):
+        # self.detect_fus = Detect(nc, ANCHORS, [128, 256, 512])  # detect for fusion feature
+
+        self.detect = Detect(nc, ANCHORS, [128, 256, 512])  # detect for visible feature
+        self.detect_l = Detect(nc, ANCHORS, [128, 256, 512])  # detect for lwir feature
+
+        # define fusion unit
+        if self.fuse:
+            self.ses = {
+                0: SE(128 * 2, 16),
+                1: SE(256 * 2, 16),
+                2: SE(512 * 2, 16)
+            }
+            self.fusion = {
+                0: Fus(128 * 2, 128),
+                1: Fus(256 * 2, 256),
+                2: Fus(512 * 2, 512)
+            }
+
+        # define visible aware model
+        if self.aware:
+            self.model_aware = AwareModel()
+            # print(torch.load(self.model_aware_path))
+            self.model_aware.load_state_dict(torch.load(self.model_aware_path))
+
+        if isinstance(self.detect, Detect):
             # visible modal
             s = 256  # 2x min stride
-            detect_vs.stride = torch.tensor(
-                [s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s),torch.zeros(1, ch, s, s))[0]])  # forward
-            detect_vs.anchors /= detect_vs.stride.view(-1, 1, 1)
-            check_anchor_order(detect_vs)
-            self.stride = detect_vs.stride
+            self.detect.stride = torch.tensor(
+                [s / x.shape[-2] for x in
+                 self.forward(torch.zeros(1, ch, s, s), torch.zeros(1, ch, s, s))[0]])  # forward
+            self.detect.anchors /= self.detect.stride.view(-1, 1, 1)
+
+            ##
+            self.detect_l.stride = self.detect.stride
+            self.detect_l.anchors = self.detect.anchors
+            self.stride = self.detect.stride
+
+            if self.fuse:
+                self.detect_fus.stride = self.detect.stride
+                self.detect_fus.anchors = self.detect.anchors
+
             # lwir modal
-            detect_lw.stride = torch.tensor(
-                [s / x.shape[-2] for x in self.forward(torch.zeros(1, ch, s, s),torch.zeros(1, ch, s, s))[0]])  # forward
-            detect_lw.anchors /= detect_lw.stride.view(-1, 1, 1)
-            check_anchor_order(detect_lw)
-            self.stride = detect_lw.stride
             self._initialize_biases()  # only run once
             # print('Strides: %s' % m.stride.tolist())
-
+        if self.fuse:
+            for k in self.ses.keys():
+                self.ses[k].to(device)
+                self.fusion[k].to(device)
         # Init weights, biases
         initialize_weights(self)
         self.info()
@@ -137,7 +181,10 @@ class Model(nn.Module):
     def forward_once(self, v_x, l_x):
         y_vs, dt_vs = [], []  # outputs
         y_lw, dt_lw = [], []
-        for m_vs, m_lw in zip(self.model_vs, self.model_lw):
+
+        vs_ts = []  # three detect tensor for visible
+        lw_ts = []  # three detect tensor for lwir
+        for i, (m_vs, m_lw) in enumerate(zip(self.model_vs, self.model_lw)):
 
             # for visible modal
             if m_vs.f != -1:  # if not from previous layer
@@ -155,18 +202,30 @@ class Model(nn.Module):
             l_x = m_lw(l_x)  # run
             y_lw.append(l_x if m_lw.i in self.save_lw else None)  # save output
 
-        return v_x, l_x
+            if i in [17, 20, 23]:
+                vs_ts.append(v_x)
+                lw_ts.append(l_x)
+
+        # fusion and detect
+        det_x = []
+        if self.fuse:
+            for i, (vs, lw) in enumerate(zip(vs_ts, lw_ts)):
+                inp = torch.cat((vs, lw), 1)
+                # inp = self.PAM[i](inp)
+                det_x.append(self.fusion[i](inp * self.ses[i](inp)))
+            out1 = self.detect_fus(det_x)
+        out2 = self.detect(vs_ts)
+        out3 = self.detect_l(lw_ts)
+
+        if self.fuse:
+            return out1, out2, out3
+
+        return out2, out3
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
         # https://arxiv.org/abs/1708.02002 section 3.3
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
-        m = self.model_vs[-1]  # Detect() module
-        for mi, s in zip(m.m, m.stride):  # from
-            b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
-            b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
-            b.data[:, 5:] += math.log(0.6 / (m.nc - 0.99)) if cf is None else torch.log(cf / cf.sum())  # cls
-            mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
-        m = self.model_lw[-1]  # Detect() module
+        m = self.detect  # Detect() module
         for mi, s in zip(m.m, m.stride):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
             b.data[:, 4] += math.log(8 / (640 / s) ** 2)  # obj (8 objects per 640 image)
@@ -174,7 +233,7 @@ class Model(nn.Module):
             mi.bias = torch.nn.Parameter(b.view(-1), requires_grad=True)
 
     def _print_biases(self):
-        m = self.model[-1]  # Detect() module
+        m = self.detect  # Detect() module
         for mi in m.m:  # from
             b = mi.bias.detach().view(m.na, -1).T  # conv.bias(255) to (3,85)
             print(('%6g Conv2d.bias:' + '%10.3g' * 6) % (mi.weight.shape[1], *b[:5].mean(1).tolist(), b[5:].mean()))
@@ -217,6 +276,10 @@ class Model(nn.Module):
     def info(self, verbose=False, img_size=640):  # print model information
         model_info_raw(self, verbose, img_size)
 
+    def load_state_para(self, vis_par, lw_par):
+        self.model_vs.load_state_dict(vis_par)
+        self.model_lw.load_state_dict(lw_par)
+
 
 def parse_model(d, ch):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
@@ -235,13 +298,13 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
 
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [Conv, Bottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP,
-                 C3]:
+                 C3_Res_S]:
             c1, c2 = ch[f], args[0]
             if c2 != no:  # if not output
                 c2 = make_divisible(c2 * gw, 8)
 
             args = [c1, c2, *args[1:]]
-            if m in [BottleneckCSP, C3]:
+            if m in [BottleneckCSP, C3_Res_S]:
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is nn.BatchNorm2d:
