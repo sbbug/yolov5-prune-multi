@@ -35,3 +35,7 @@
 #### 模型部署到边缘设备效果截图
 
 ![边缘设备部署效果](./img/1-4.png)
+
+## 参考
+[AGX板卡模型推理部署仓库](https://github.com/sbbug/yolov5-multi-tensorrt)
+[地平线板卡模型推理部署仓库](https://github.com/sbbug/x3_chain)
